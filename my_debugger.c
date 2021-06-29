@@ -26,16 +26,21 @@ pid_t run_target(const char* programname)
 	pid = fork();
 	
     if (pid > 0) {
+        //printf("in father\n");
         return pid;
     } else if (pid == 0) {
+        //printf("in son 1\n");
         int error = ptrace(PTRACE_TRACEME, 0, NULL, NULL);
-		if (error < 0) {
+		//printf("in son 2\n");
+        if (error < 0) {
 			perror("ptrace");
             system("uname -a");
 			exit(1);
         }
+        //printf("in son 3\n");
 		execl(programname, programname, NULL);
-		
+		//printf("in son 4\n");
+
 	} else {
 		perror("fork");
         exit(1);
@@ -52,7 +57,7 @@ void run_syscall_debugger(pid_t child_pid, Elf64_Addr start_add)
 	struct user_regs_struct regs;
 
     waitpid(child_pid, &wait_status, 0);
-    if(WIFSIGNALED(wait_status))return;
+    //if(WIFSIGNALED(wait_status))return;
 
 
     ptrace(PTRACE_GETREGS, child_pid, 0, &regs);
@@ -66,6 +71,11 @@ void run_syscall_debugger(pid_t child_pid, Elf64_Addr start_add)
     unsigned long data_trap = (data & 0xFFFFFFFF00) | 0xCC;
     ptrace(PTRACE_POKETEXT, child_pid, addr, (void*)data_trap);
 
+    //peek after poke
+    //unsigned long data_alon = ptrace(PTRACE_PEEKTEXT, child_pid, start_add, NULL);
+    //printf("DBG: data is now at 0x%llx: 0x%lx\n", addr, data_alon);
+    //
+
     ptrace(PTRACE_CONT, child_pid, NULL, NULL);
     waitpid(child_pid, &wait_status, 0);
 
@@ -77,7 +87,10 @@ void run_syscall_debugger(pid_t child_pid, Elf64_Addr start_add)
     ptrace(PTRACE_POKETEXT, child_pid, addr, (void*)data);
     ptrace(PTRACE_GETREGS, child_pid, 0, &regs);
     regs.rip -= 1;
+    printf("DBG: now at RIP = 0x%llx\n", regs.rip);
     ptrace(PTRACE_SETREGS, child_pid, 0, &regs);
+    printf("DBG: now again at RIP = 0x%llx\n", regs.rip);
+
 
     //ptrace(PTRACE_CONT, child_pid, 0, 0);
     //wait(&wait_status);
