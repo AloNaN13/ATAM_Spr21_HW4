@@ -1,5 +1,6 @@
 
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -16,30 +17,26 @@
 #include <fcntl.h>
 #include "elf64.h"
 
+
 void run_syscall_debugger(pid_t child_pid, Elf64_Addr start_add);
 
 
-pid_t run_target(const char* programname)
+pid_t run_target(const char* programname, char** args)
 {
 	pid_t pid;
 	
 	pid = fork();
 	
     if (pid > 0) {
-        //printf("in father\n");
         return pid;
     } else if (pid == 0) {
-        //printf("in son 1\n");
         int error = ptrace(PTRACE_TRACEME, 0, NULL, NULL);
-		//printf("in son 2\n");
         if (error < 0) {
 			perror("ptrace");
             system("uname -a");
 			exit(1);
         }
-        //printf("in son 3\n");
-		execl(programname, programname, NULL);
-		//printf("in son 4\n");
+		execl(programname, *args, NULL);
 
 	} else {
 		perror("fork");
@@ -50,79 +47,93 @@ pid_t run_target(const char* programname)
 }
 
 
-void run_syscall_debugger(pid_t child_pid, Elf64_Addr start_add)
-{
+void run_syscall_debugger(pid_t child_pid, Elf64_Addr start_add){
+    
     int wait_status;
     unsigned long start = start_add;
 	struct user_regs_struct regs;
 
     waitpid(child_pid, &wait_status, 0);
-    //if(WIFSIGNALED(wait_status))return;
-
-
-    ptrace(PTRACE_GETREGS, child_pid, 0, &regs);
-    printf("DBG: Child stopped at RIP = 0x%llx\n", regs.rip);
-
 
     unsigned long long addr = start_add;
-    unsigned long data = ptrace(PTRACE_PEEKTEXT, child_pid, start_add, NULL);
-    printf("DBG: Original data at 0x%llx: 0x%lx\n", addr, data);
-
-    unsigned long data_trap = (data & 0xFFFFFFFF00) | 0xCC;
-    ptrace(PTRACE_POKETEXT, child_pid, addr, (void*)data_trap);
-
-    //peek after poke
-    //unsigned long data_alon = ptrace(PTRACE_PEEKTEXT, child_pid, start_add, NULL);
-    //printf("DBG: data is now at 0x%llx: 0x%lx\n", addr, data_alon);
-    //
-
-    ptrace(PTRACE_CONT, child_pid, NULL, NULL);
-    waitpid(child_pid, &wait_status, 0);
-
-    ptrace(PTRACE_GETREGS, child_pid, 0, &regs);
-    printf("DBG: Child stopped at RIP = 0x%llx\n", regs.rip);
-
-    unsigned long data2 = ptrace(PTRACE_PEEKTEXT, child_pid, addr, NULL);
-
-    ptrace(PTRACE_POKETEXT, child_pid, addr, (void*)data);
-    ptrace(PTRACE_GETREGS, child_pid, 0, &regs);
-    regs.rip -= 1;
-    printf("DBG: now at RIP = 0x%llx\n", regs.rip);
-    ptrace(PTRACE_SETREGS, child_pid, 0, &regs);
-    printf("DBG: now again at RIP = 0x%llx\n", regs.rip);
-
-
-    //ptrace(PTRACE_CONT, child_pid, 0, 0);
-    //wait(&wait_status);
-
-
-    while(1)
-    {
-
-    	ptrace(PTRACE_SYSCALL, child_pid, NULL, NULL);
-	    waitpid(child_pid, &wait_status, 0);
-        ptrace(PTRACE_GETREGS, child_pid, 0, &regs);
-        unsigned long long add = regs.rip - 2;
-        int syscall_num = ptrace(PTRACE_PEEKUSER, RAX);
-        
-	    ptrace(PTRACE_SYSCALL, child_pid, NULL, NULL);
-	    waitpid(child_pid, &wait_status, 0);
-
-        int return_val = ptrace(PTRACE_PEEKUSER, RAX);
-
-	    ptrace(PTRACE_GETREGS, child_pid, NULL, &regs);
-    	//printf("PRF:: syscall in 0x%llx returned with %d\n" ,add, return_val);
-        ptrace(PTRACE_CONT, child_pid, 0, 0);
-        waitpid(child_pid, &wait_status, 0);
-
-        if(WIFEXITED(wait_status) > 0) break;
-    }
     
-}
+    unsigned long data = ptrace(PTRACE_PEEKTEXT, child_pid, start_add, NULL);
+    unsigned long data_trap = (data & 0xFFFFFFFFFFFFFF00) | 0xCC;
+    ptrace(PTRACE_POKETEXT, child_pid, (void*)addr, (void*)data_trap);
+    unsigned newdata = ptrace(PTRACE_PEEKTEXT, child_pid, start_add, NULL);
+
+    ptrace(PTRACE_GETREGS, child_pid, 0, &regs);
+    ptrace(PTRACE_CONT, child_pid, NULL, NULL);
+    wait(&wait_status);
+
+    while(WIFSTOPPED(wait_status)){
+        
+        bool f = true;
+        regs.rip = 0;  
+        ptrace(PTRACE_GETREGS, child_pid, 0, &regs);
+
+        unsigned long rsp = regs.rsp;
+         
+        Elf64_Addr ret_add = ptrace(PTRACE_PEEKTEXT, child_pid, rsp, NULL);
+        unsigned long ret_data = ptrace(PTRACE_PEEKTEXT, child_pid, ret_add, NULL);
+        unsigned long ret_data_trap = (ret_data & 0xFFFFFFFFFFFFFF00) | 0xCC;
+        ptrace(PTRACE_POKETEXT, child_pid, ret_add, (void*)ret_data_trap);  
+    
+        ptrace(PTRACE_GETREGS, child_pid, 0, &regs);
+        ptrace(PTRACE_POKETEXT, child_pid, addr, (void*)data);
+        
+        ptrace(PTRACE_GETREGS, child_pid, 0, &regs);
+        regs.rip -= 1;
+        ptrace(PTRACE_SETREGS, child_pid, 0, &regs);
+
+        while(!WIFEXITED(wait_status) && f)
+        {
+           
+            ptrace(PTRACE_SYSCALL, child_pid, NULL, NULL);
+            wait(&wait_status);
+              
+            ptrace(PTRACE_GETREGS, child_pid, 0, &regs);
+            unsigned long long add = regs.rip - 2;
+
+            if(regs.rip == ret_add + 1)
+            {   
+                ptrace(PTRACE_POKETEXT, child_pid, ret_add, (void*)ret_data);
+        
+                ptrace(PTRACE_GETREGS, child_pid, 0, &regs);
+                regs.rip -= 1;
+                ptrace(PTRACE_SETREGS, child_pid, 0, &regs);       
+
+                if(rsp < regs.rsp){
+                    f = false;
+                }
+            }
+
+            else{
+                   
+                ptrace(PTRACE_SYSCALL, child_pid, NULL, NULL);
+                wait(&wait_status);
+
+                ptrace(PTRACE_GETREGS, child_pid, 0, &regs);
+                int return_val = regs.rax;
+
+                if(return_val < 0){
+                    printf("PRF:: syscall in %llx returned with %lld\n" ,add, regs.rax);
+                }
+            
+            }
+          
+        }
+        ptrace(PTRACE_POKETEXT, child_pid, addr, (void*)data_trap);
+        ptrace(PTRACE_CONT, child_pid, NULL, NULL);
+        wait(&wait_status);    
+            
+    }
+}    
 
 
 int main(int argc, char** argv)
 {
+    
     pid_t child_pid;
 
     int fd = open(argv[2], O_RDONLY);
@@ -133,7 +144,6 @@ int main(int argc, char** argv)
     
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *)p;
     Elf64_Shdr *shdrs = (void*)ehdr+ehdr->e_shoff;
-    Elf64_Shdr *txhdr;
     int found_function = -1;
     int symbol_num;
     Elf64_Sym *symtab;
@@ -149,24 +159,33 @@ int main(int argc, char** argv)
             symbol_num = shdrs[i].sh_size/shdrs[i].sh_entsize;
         }
 
+    }
+
+    for(int i = 0; i< ehdr->e_shnum; i++){
         if(strcmp(shdrs[i].sh_name + sh_strtbl_b, ".strtab") == 0){
             strtab = &shdrs[i];
             strtab_b = (char*)p + strtab->sh_offset;
-        }
+        
+            for(int j = 0; j<symbol_num; j++){
+                
+                if(strcmp(strtab_b + symtab[j].st_name, argv[1]) == 0){
+                    if(ELF64_ST_BIND(symtab[j].st_info) == 1)
+                    {
+                        found_function = 1;
+                        Elf64_Sym* sy = &symtab[j];
+                        fun_add = sy->st_value;
+                        break;
+                    }
+                    else{
+                        printf("PRF:: local found!\n");
+                        exit(1);
+                    }
 
-    }
-
-    for(int i = 0; i<symbol_num; i++){
-        if(strcmp(strtab_b + symtab[i].st_name, argv[1]) == 0){
-            if(ELF64_ST_BIND(symtab[i].st_info) == 1)
-            {
-                found_function = 1;
-                Elf64_Sym* sy = &symtab[i];
-                fun_add = sy->st_value;
-                break;
+                }
             }
-
+            
         }
+
     }
 
 
@@ -175,11 +194,10 @@ int main(int argc, char** argv)
         exit(1);
     }
 
-
-    child_pid = run_target(argv[2]);
+    char** arg = argv + 2;
+    child_pid = run_target(argv[2],arg );
 	
 	run_syscall_debugger(child_pid, fun_add);
-    pid_t my_id = getpid();
-    printf("hey i'm %d", my_id);
+
     return 0;
 }
